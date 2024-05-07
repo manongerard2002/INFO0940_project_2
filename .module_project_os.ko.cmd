@@ -1,0 +1,1 @@
+cmd_/home/student/project2/module_project_os.ko := ld -r -m elf_i386 -T ./scripts/module-common.lds --build-id  -o /home/student/project2/module_project_os.ko /home/student/project2/module_project_os.o /home/student/project2/module_project_os.mod.o ;  true
