@@ -1,11 +1,11 @@
-#include<linux/fs.h>        // file operations
-#include<linux/proc_fs.h>   // proc_create, proc_ops
-#include<linux/uaccess.h>   // copy_from_user, copy_to_user
-#include<linux/init.h>      // kernel initialization
-#include<linux/seq_file.h>  // seq_read, seq_lseek, single_open, single_release
-#include<linux/module.h>    // all modules need this
-#include<linux/slab.h>      // memory allocation (kmalloc/kzalloc)
-#include<linux/kernel.h>    // kernel logging
+#include <linux/fs.h>        // file operations
+#include <linux/proc_fs.h>   // proc_create, proc_ops
+#include <linux/uaccess.h>   // copy_from_user, copy_to_user
+#include <linux/init.h>      // kernel initialization
+#include <linux/seq_file.h>  // seq_read, seq_lseek, single_open, single_release
+#include <linux/module.h>    // all modules need this
+#include <linux/slab.h>      // memory allocation (kmalloc/kzalloc)
+#include <linux/kernel.h>    // kernel logging
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
@@ -158,13 +158,16 @@ static void free_process_memory_info(void) {
     struct process_memory_info *info;
     struct hlist_node *tmp;
     unsigned int bkt;
+    printk(KERN_INFO "free_process_memory_info\n");
 
     // Iterate through the hash table and free memory for each entry
     hash_for_each_safe(process_memory_hash, bkt, tmp, info, node) {
+        printk(KERN_INFO "free_process_memory_info: process\n");
         // Free any allocated memory for the entry
         hash_del(&info->node);
         kfree(info->pids);
         kfree(info);
+        printk(KERN_INFO "free_process_memory_info: end process\n");
     }
 }
 
@@ -184,6 +187,7 @@ static char *format_process_memory_info(struct process_memory_info *info) {
         buffer_size += snprintf(NULL, 0, " %d", info->pids[i]);
     }
     buffer_size += snprintf(NULL, 0, "\n");
+    printk(KERN_INFO "- buffer size = %zu\n", buffer_size);
 
     // Allocate memory for the output buffer
     output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL);
@@ -193,13 +197,15 @@ static char *format_process_memory_info(struct process_memory_info *info) {
 
     // Format the output
     ptr = output_buffer;
-    ptr += snprintf(ptr, buffer_size, "%s, total: %lu, valid: %lu, invalid: %lu, maybeshared: %lu, nbgroup: %lu, pid(#pid):",
+    ptr += snprintf(ptr, buffer_size + 1, "%s, total: %lu, valid: %lu, invalid: %lu, maybeshared: %lu, nbgroup: %lu, pid(#pid):",
                     info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages,
                     info->nb_shareable_pages, info->nb_group);
     for (i = 0; i < info->pid_count; ++i) {
-        ptr += snprintf(ptr, buffer_size - (ptr - output_buffer), " %d", info->pids[i]);
+        ptr += snprintf(ptr, buffer_size +1 - (ptr - output_buffer), " %d", info->pids[i]);
     }
-    ptr += snprintf(ptr, buffer_size - (ptr - output_buffer), "\n");
+    ptr += snprintf(ptr, buffer_size +1 - (ptr - output_buffer), "\n");
+    printk(KERN_INFO "Formatted output: %s\n", output_buffer);
+    printk(KERN_INFO "- end format_process_memory_info\n");
 
     return output_buffer;
 }
@@ -261,26 +267,18 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
                 goto out;
             }
             strcat(output_buffer, formatted_info);
+            strcat(output_buffer, "\n"); // Add a newline between each process info
             kfree(formatted_info);
         }
         message = output_buffer;
+        printk(KERN_INFO "end ALL - message = %s\n", message);
         ret = strlen(message);
     } else if (strncmp(command, "FILTER|", 7) == 0) {
         printk(KERN_INFO "Read FILTER|\n");
-        // Display memory information of processes matching the filter
-        // Extract the process name from the command
         argument = command + 7;
-        // Implement filtering based on the process name
-        // Example: Filter the process named "sshd"
-        // message = ...
     } else if (strncmp(command, "DEL|", 4) == 0) {
         printk(KERN_INFO "Read DEL|\n");
-        // Delete memory information of processes matching the filter
-        // Extract the process name from the command
         argument = command + 4;
-        // Implement deletion based on the process name
-        // Example: Delete the memory information of processes named "sshd"
-        // message = ...
     } else {
         ret = -EINVAL; // Unknown command
         printk(KERN_INFO "Read ERROR IN COMMAND\n");
@@ -335,6 +333,7 @@ static int __init module_start(void) {
 
 // Module exit function
 static void __exit module_stop(void) {
+    printk(KERN_INFO "exit");
     free_process_memory_info();
     printk(KERN_INFO "Memory information data structure freed.\n");
     // remove proc entry
