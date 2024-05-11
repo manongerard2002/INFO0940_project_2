@@ -1,11 +1,11 @@
-#include <linux/fs.h>        // file operations
-#include <linux/proc_fs.h>   // proc_create, proc_ops
-#include <linux/uaccess.h>   // copy_from_user, copy_to_user
-#include <linux/init.h>      // kernel initialization
-#include <linux/seq_file.h>  // seq_read, seq_lseek, single_open, single_release
-#include <linux/module.h>    // all modules need this
-#include <linux/slab.h>      // memory allocation (kmalloc/kzalloc)
-#include <linux/kernel.h>    // kernel logging
+#include <linux/fs.h>       // file operations
+#include <linux/proc_fs.h>  // proc_create, proc_ops
+#include <linux/uaccess.h>  // copy_from_user, copy_to_user
+#include <linux/init.h>     // kernel initialization
+#include <linux/seq_file.h> // seq_read, seq_lseek, single_open, single_release
+#include <linux/module.h>   // all modules need this
+#include <linux/slab.h>     // memory allocation (kmalloc/kzalloc)
+#include <linux/kernel.h>   // kernel logging
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
@@ -13,10 +13,12 @@
 #include <linux/memory.h>
 #include <linux/hashtable.h>
 #include <linux/jhash.h>
+#include <linux/types.h>
 
 #define DEV_NAME "memory_info"  // name of the proc entry
 #define MAX_PIDS 1000
 #define MAX_NAME_LENGTH 16      // maximum length of a process name is limited at 16 characters
+#define MY_HASH_SIZE 2048
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Group08");
@@ -24,20 +26,26 @@ MODULE_DESCRIPTION("Kernel module for tracking memory usage of processes");
 
 static char *message = NULL;
 
+// Define a structure to store the pid of a process
+struct pid_entry {
+    pid_t pid;
+    struct list_head list_node;
+};
+
 // Define a structure to store memory information for each set of processes
 struct process_memory_info {
-    char name[MAX_NAME_LENGTH + 1]; // Additional space for null terminator: need to test this
-    int *pids;
+    char name[MAX_NAME_LENGTH];
+    struct list_head pids;
     int pid_count;
     unsigned long nb_total_pages;
     unsigned long nb_valid_pages;
     unsigned long nb_invalid_pages;
     unsigned long nb_shareable_pages;
     unsigned long nb_group;
-    struct hlist_node node;
+    struct hlist_node hlist_node;
 };
-static DEFINE_HASHTABLE(process_memory_hash, 8); //what number to put ? a power of 2
-//static DEFINE_SPINLOCK(process_memory_hash_lock);
+
+static DEFINE_HASHTABLE(process_memory_hashlist, 8); //what number to put ? a power of 2
 
 // Function to calculate hash value for a string
 static inline unsigned int hash_str(const char *str)
@@ -45,262 +53,455 @@ static inline unsigned int hash_str(const char *str)
     return jhash(str, strlen(str), 0);
 }
 
-// Function to populate the data structure with memory information for running processes
-static void populate_process_memory_info(void) {
-    struct task_struct *task;
-    struct mm_struct *mm;
-    struct vm_area_struct *vma;
+void print_process_memory_info(struct process_memory_info *info)
+{
+    struct pid_entry *pid_entry;
+    int i = 0;
+
+    if (info == NULL)
+    {
+        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info.\n");
+        return;
+    }
+
+    printk(KERN_INFO "%s, total: %lu, valid: %lu, invalid: %lu, may_be_shared: %lu, nb_group: %lu, pid(%d): ", 
+            info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages, 
+            info->nb_shareable_pages, info->nb_group, info->pid_count);
+
+    // Print all the PIDs associated with this process name
+    list_for_each_entry(pid_entry, &info->pids, list_node)
+    {
+        printk(KERN_CONT "%d", pid_entry->pid);
+        if (++i < info->pid_count)
+        {
+            printk(KERN_CONT "; ");
+        }
+    }
+    printk(KERN_CONT "\n");
+}
+
+static void print_hash_table(void)
+{
     struct process_memory_info *info;
-    struct process_memory_info *existing_info;
+    unsigned int bkt;
+
+    printk(KERN_INFO "---------------------------------------\n");
+    printk(KERN_INFO "Printing Hash Table:\n");
+
+    // Iterate over each possible entry in the hash table
+    hash_for_each(process_memory_hashlist, bkt, info, hlist_node)
+    {
+        print_process_memory_info(info);
+    }
+    printk(KERN_INFO "---------------------------------------\n");
+}
+
+// Function to populate the data structure with memory information for running processes
+static ssize_t populate_process_memory_info(void)
+{
+    ssize_t ret = 0;
+    struct task_struct *task;
+    struct process_memory_info *info, *existing_info;
+    struct mm_struct *mm;
+    struct pid_entry *new_pid_entry;
 
     // Iterate through each process
-    for_each_process(task) {
-        unsigned long prev_start = 0;
-        unsigned long prev_end = 0;
-        // Allocate memory for the info structure
+    for_each_process(task)
+    {
+        // Get task's memory management struct (mm)
+        mm = get_task_mm(task);
+        if (!mm)
+        {
+            // Process(es) with no page must be ignored
+            continue;
+        }
+
+        // Check if the entry already exists in the hash table
+        hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(task->comm))
+        {
+            //printk(KERN_INFO "existing_info->name = %s    task->comm=%s", existing_info->name, task->comm);
+            if (strncmp(existing_info->name, task->comm, MAX_NAME_LENGTH) == 0)
+            {
+                // Entry already exists, update it
+                printk(KERN_INFO "Entry %s already exists", task->comm);
+                new_pid_entry = kmalloc(sizeof(struct pid_entry), GFP_KERNEL);
+                if (!new_pid_entry)
+                {
+                    // Handle allocation failure
+                    ret = -ENOMEM;
+                    goto out;
+                }
+                new_pid_entry->pid = task->pid;
+                list_add_tail(&new_pid_entry->list_node, &existing_info->pids);
+                existing_info->pid_count++;
+                existing_info->nb_total_pages += mm->total_vm;
+                /*existing_info->nb_valid_pages += 0;
+                existing_info->nb_invalid_pages += 0;
+                existing_info->nb_shareable_pages += 2;
+                existing_info->nb_group += 0;*/
+                goto next_process;
+            }
+        }
+
+        // Entry doesn't exist, allocate memory for the info structure
+        //printk(KERN_INFO "Entry %s doesn't exist", task->comm);
         info = kmalloc(sizeof(*info), GFP_KERNEL);
-        if (!info) {
-            printk(KERN_ERR "Failed to allocate memory for process info\n");
-            return;
+        if (!info)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for process info\n");
+            ret = -ENOMEM;
+            goto out;
         }
 
         // Initialize info structure
         strncpy(info->name, task->comm, MAX_NAME_LENGTH);
-        info->name[MAX_NAME_LENGTH] = '\0'; // Ensure null termination
-
-        //NEED to change this !
-        info->pids = kmalloc(MAX_PIDS * sizeof(int), GFP_KERNEL);
-        if (!info->pids) {
-            printk(KERN_ERR "Failed to allocate memory for PIDs\n");
-            kfree(info); // Free allocated memory if PID array allocation fails
-            continue;
+        INIT_LIST_HEAD(&info->pids);
+        // Add task->pid to info->pids
+        new_pid_entry = kmalloc(sizeof(struct pid_entry), GFP_KERNEL);
+        if (!new_pid_entry) {
+            // Handle allocation failure
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for PIDs\n");
+            kfree(info); // Free allocated memory if PID entry allocation fails
+            ret = -ENOMEM;
+            goto out;
         }
-        info->pids[0] = task->pid; // Store PID
-        info->pid_count = 1;       // Update PID count
-        info->nb_total_pages = 0;
+        new_pid_entry->pid = task->pid;
+        list_add_tail(&new_pid_entry->list_node, &info->pids);
+        info->pid_count = 1;
+        info->nb_total_pages = mm->total_vm;
         info->nb_valid_pages = 0;
         info->nb_invalid_pages = 0;
         info->nb_shareable_pages = 0;
         info->nb_group = 0;
 
-        // Get task's memory management struct (mm)
-        mm = get_task_mm(task);
-        // ecampus: "Processes with a NULL task->mm struct, must not be displayed."
-        if (!mm) {
-            printk(KERN_ERR "Failed to get mm_struct for process %d\n", task->pid);
-            kfree(info->pids); // Free allocated memory for PIDs
-            kfree(info); // Free allocated memory if mm_struct is missing
-            continue;
-        } else {
-            printk(KERN_INFO "Getting mm_struct for process %d suceeded\n", task->pid);
-        }
-
-        // Gather memory usage information (replace with functions based on your kernel version)
-        //info->nb_total_pages = get_mm_total_rss(mm); // Total resident set size
-        //info->nb_valid_pages = get_mm_rss(mm);             // Resident set size (excluding swap)
-
-        //WTF: need to understand
-        // Iterate over each VMA of the process
-        for (vma = mm->mmap; vma; vma = vma->vm_next) {
-            unsigned long start = vma->vm_start;
-            unsigned long end = vma->vm_end;
-            unsigned long size = end - start;
-            info->nb_total_pages += size >> PAGE_SHIFT;
-            if (vma->vm_flags & VM_SOFTDIRTY)
-                info->nb_valid_pages += size >> PAGE_SHIFT;
-            else
-                info->nb_invalid_pages += size >> PAGE_SHIFT;
-            if ((vma->vm_flags & VM_SHARED) && !(vma->vm_flags & VM_WRITE)) {
-                if (start == prev_start && end == prev_end) {
-                    info->nb_shareable_pages += size >> PAGE_SHIFT;
-                    info->nb_group++;
-                }
-            }
-            prev_start = start;
-            prev_end = end;
-        }
-
-        // Check if the entry already exists in the hash table
-        hash_for_each_possible(process_memory_hash, existing_info, node, hash_str(info->name)) {
-            if (strncmp(existing_info->name, info->name, MAX_NAME_LENGTH) == 0) {
-                // Entry already exists, update it
-                info->pid_count = existing_info->pid_count + 1;
-                memcpy(existing_info->pids, info->pids, sizeof(int) * existing_info->pid_count);
-                existing_info->nb_total_pages += info->nb_total_pages;
-                existing_info->nb_valid_pages += info->nb_valid_pages;
-                existing_info->nb_invalid_pages += info->nb_invalid_pages;
-                existing_info->nb_shareable_pages += info->nb_shareable_pages;
-                existing_info->nb_group += info->nb_group;
-                kfree(info->pids);
-                kfree(info);
-                goto next_process;
-            }
-        }
-
-        // Entry doesn't exist, add it to the hash table
-        hash_add(process_memory_hash, &info->node, hash_str(info->name));
+        // Add the new entry to the hashtable
+        hash_add(process_memory_hashlist, &info->hlist_node, hash_str(task->comm));
 
     next_process:
         continue;
     }
+    print_hash_table();
+
+out:
+    return ret;
 }
 
-/*void print_process_info(void) {
-    struct task_struct *task;
-
-    for_each_process(task) {
-        printk(KERN_INFO "Process Name: %s (PID: %d)\n", task->comm, task->pid);
-    }
-}*/
-
 // Function to free resources associated with DS
-static void free_process_memory_info(void) {
+static void free_process_memory_info(void)
+{
     struct process_memory_info *info;
     struct hlist_node *tmp;
     unsigned int bkt;
-    printk(KERN_INFO "free_process_memory_info\n");
-
+    struct pid_entry *pid_entry, *pid_tmp;
     // Iterate through the hash table and free memory for each entry
-    hash_for_each_safe(process_memory_hash, bkt, tmp, info, node) {
-        printk(KERN_INFO "free_process_memory_info: process\n");
+    hash_for_each_safe(process_memory_hashlist, bkt, tmp, info, hlist_node)
+    {
         // Free any allocated memory for the entry
-        hash_del(&info->node);
-        kfree(info->pids);
+        hash_del(&info->hlist_node);
+        list_for_each_entry_safe(pid_entry, pid_tmp, &info->pids, list_node) {
+            list_del(&pid_entry->list_node);
+            kfree(pid_entry);
+        }
         kfree(info);
-        printk(KERN_INFO "free_process_memory_info: end process\n");
     }
 }
 
-// Function to format memory information of a specific process node
-static char *format_process_memory_info(struct process_memory_info *info) {
-    char *output_buffer = NULL;
-    char *ptr = NULL;
+static size_t calculate_buffer_size(struct process_memory_info *info)
+{
+    struct pid_entry *pid_entry;
     size_t buffer_size = 0;
-    int i;
-    printk(KERN_INFO "Inside format_process_memory_info for process %d\n", info->pids[0]);
+    int i = 0;
+    if (!info)
+    {
+        printk(KERN_ERR "[ERROR] Null pointer passed to calculate_buffer_size.\n");
+        return 0;
+    }
 
-    // Calculate the required buffer size
-    buffer_size += snprintf(NULL, 0, "%s, total: %lu, valid: %lu, invalid: %lu, maybeshared: %lu, nbgroup: %lu, pid(#pid):",
+    // Calculate the total length of the message
+    buffer_size += snprintf(NULL, 0, "%s, total: %lu, valid: %lu, invalid: %lu, may_be_shared: %lu, nb_group: %lu, pid(%d): ",
                             info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages,
-                            info->nb_shareable_pages, info->nb_group);
-    for (i = 0; i < info->pid_count; ++i) {
-        buffer_size += snprintf(NULL, 0, " %d", info->pids[i]);
+                            info->nb_shareable_pages, info->nb_group, info->pid_count);
+    list_for_each_entry(pid_entry, &info->pids, list_node)
+    {
+        buffer_size += snprintf(NULL, 0, "%d", pid_entry->pid);
+        if (++i < info->pid_count)
+        {
+            buffer_size += snprintf(NULL, 0, "; ");
+        }
     }
     buffer_size += snprintf(NULL, 0, "\n");
-    printk(KERN_INFO "- buffer size = %zu\n", buffer_size);
 
-    // Allocate memory for the output buffer
-    output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL);
-    if (!output_buffer) {
+    return buffer_size;
+}
+
+// Function to generate the message for a given process info
+static size_t generate_process_info_message(struct process_memory_info *info, char *output_buffer, size_t buffer_size)
+{
+    struct pid_entry *pid_entry;
+    size_t tmp_buffer_size = 0;
+    size_t tmp_size = 0; //need to find better name
+    int i = 0;
+
+    // Generate the message for the given process info
+    tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "%s, total: %lu, valid: %lu, invalid: %lu, may_be_shared: %lu, nb_group: %lu, pid(%d): ",
+                        info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages,
+                        info->nb_shareable_pages, info->nb_group, info->pid_count);
+    tmp_buffer_size += tmp_size;
+    buffer_size -= tmp_size;
+
+    list_for_each_entry(pid_entry, &info->pids, list_node)
+    {
+        tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "%d", pid_entry->pid);
+        tmp_buffer_size += tmp_size;
+        buffer_size -= tmp_size;
+        if (++i < info->pid_count)
+        {
+            tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "; ");
+            tmp_buffer_size += tmp_size;
+            buffer_size -= tmp_size;
+        }
+    }
+    tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "\n");
+    tmp_buffer_size += tmp_size;
+
+    return tmp_buffer_size;
+}
+
+
+// Function to format process memory info for a single process
+static char *format_process_memory_info(struct process_memory_info *info)
+{
+    size_t buffer_size = 0;
+    char *output_buffer = NULL;
+    if (!info)
+    {
+        printk(KERN_ERR "[ERROR] Null pointer passed to format_process_memory_info.\n");
         return NULL;
     }
 
-    // Format the output
-    ptr = output_buffer;
-    ptr += snprintf(ptr, buffer_size + 1, "%s, total: %lu, valid: %lu, invalid: %lu, maybeshared: %lu, nbgroup: %lu, pid(#pid):",
-                    info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages,
-                    info->nb_shareable_pages, info->nb_group);
-    for (i = 0; i < info->pid_count; ++i) {
-        ptr += snprintf(ptr, buffer_size +1 - (ptr - output_buffer), " %d", info->pids[i]);
+    // Calculate the total length of the message
+    buffer_size = calculate_buffer_size(info);
+
+    // Allocate memory for the message
+    output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL); //+1 for '\0'
+    if (!output_buffer)
+    {
+        printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+        return NULL;
     }
-    ptr += snprintf(ptr, buffer_size +1 - (ptr - output_buffer), "\n");
-    printk(KERN_INFO "Formatted output: %s\n", output_buffer);
-    printk(KERN_INFO "- end format_process_memory_info\n");
+
+    // Generate the message for the given process info
+    generate_process_info_message(info, output_buffer, buffer_size);
+
+    return output_buffer;
+}
+
+// Function to format process memory info for all processes
+static char *format_process_memory_info_ALL(void)
+{
+    struct process_memory_info *info;
+    unsigned int bkt;
+    size_t buffer_size = 0;
+    size_t tmp_buffer_size = 0;
+    char *output_buffer = NULL;
+
+    // Calculate the total length of the message
+    hash_for_each(process_memory_hashlist, bkt, info, hlist_node)
+    {
+        buffer_size += calculate_buffer_size(info);
+    }
+
+    // Allocate memory for the message
+    output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL); //+1 for '\0'
+    if (!output_buffer)
+    {
+        printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+        return NULL;
+    }
+
+    // Generate the message for each process info
+    hash_for_each(process_memory_hashlist, bkt, info, hlist_node)
+    {
+        tmp_buffer_size += generate_process_info_message(info, output_buffer + tmp_buffer_size, buffer_size - tmp_buffer_size);
+
+        /*// Generate the message for each process info
+        tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "%s, total: %lu, valid: %lu, invalid: %lu, may_be_shared: %lu, nb_group: %lu, pid(%d): ",
+                            info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages, 
+                            info->nb_shareable_pages, info->nb_group, info->pid_count);
+        tmp_buffer_size += tmp_size;
+        buffer_size -= tmp_size;
+        list_for_each_entry(pid_entry, &info->pids, list_node)
+        {
+            tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "%d", pid_entry->pid);
+            tmp_buffer_size += tmp_size;
+            buffer_size -= tmp_size;
+            if (++i < info->pid_count)
+            {
+                tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "; ");
+                tmp_buffer_size += tmp_size;
+                buffer_size -= tmp_size;
+            }
+        }
+        tmp_size = snprintf(output_buffer + tmp_buffer_size, buffer_size, "\n");
+        tmp_buffer_size += tmp_size;
+        buffer_size -= tmp_size;*/
+    }
 
     return output_buffer;
 }
 
 // this function writes a message to the pseudo file system
-static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt, loff_t *f_pos) {
-    char *command = NULL;
-    char *output_buffer = NULL;
-    size_t buffer_size = 0;
-    char *argument = NULL;
+static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt, loff_t *f_pos)
+{
     ssize_t ret = 0;
-
     // allocate memory, (size and flag) - flag: type of memory (kernel memory)
     char *tmp = kzalloc(cnt + 1, GFP_KERNEL);
-    if (!tmp) {
+    if (!tmp)
+    {
+        printk(KERN_ERR "[ERROR] Failed to allocate memory for temporary buffer.\n");
         return -ENOMEM;
     }
 
     // copy data from user space to kernel space by using copy_from_user
-    if (copy_from_user(tmp, buff, cnt)) {
+    if (copy_from_user(tmp, buff, cnt))
+    {
+        printk(KERN_ERR "[ERROR] Bad address when attempting to copy from user to kernel space.\n");
         kfree(tmp);
         return -EFAULT;
     }
 
-    // Tokenize the input buffer to extract command and argument
-    command = strsep(&tmp, " \n");
-    if (!command) {
-        ret = -EINVAL; // Malformed command
-        goto out;
+    if (message)
+    {
+        kfree(message);
     }
 
-    if (strcmp(command, "RESET") == 0) {
+    if (strcmp(tmp, "RESET\n") == 0)
+    {
         printk(KERN_INFO "Read RESET\n");
+        message = kstrdup("RESET: need to free and populate", GFP_KERNEL);
+        if (!message)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for ...\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
         // Reset the in-memory data structure
         free_process_memory_info();
         // Populate it with process information
-        populate_process_memory_info();
-        message = "[SUCCESS]\n";
-        ret = strlen(message);
-    } else if (strcmp(command, "ALL") == 0) {
-        // Display memory information of all processes
-        struct process_memory_info *info;
-        //struct hlist_node *node;
-        unsigned int bkt;
-        printk(KERN_INFO "Read ALL\n");
-
-        // Iterate through the hash table and format each process node
-        hash_for_each(process_memory_hash, bkt, info, node) {
-            char *formatted_info = format_process_memory_info(info);
-            if (!formatted_info) {
-                ret = -ENOMEM;
-                goto out;
-            }
-            buffer_size += strlen(formatted_info);
-            output_buffer = krealloc(output_buffer, buffer_size + 1, GFP_KERNEL);
-            if (!output_buffer) {
-                ret = -ENOMEM;
-                kfree(formatted_info);
-                goto out;
-            }
-            strcat(output_buffer, formatted_info);
-            strcat(output_buffer, "\n"); // Add a newline between each process info
-            kfree(formatted_info);
+        ret = populate_process_memory_info();
+        if (ret < 0)
+        {
+            kfree(tmp);
+            return ret;
         }
-        message = output_buffer;
-        printk(KERN_INFO "end ALL - message = %s\n", message);
+        message = kstrdup("[SUCCESS]\n", GFP_KERNEL);
+        if (!message)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for RESET message\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
         ret = strlen(message);
-    } else if (strncmp(command, "FILTER|", 7) == 0) {
+    }
+    else if (strcmp(tmp, "ALL\n") == 0)
+    {
+        printk(KERN_INFO "Read ALL\n");
+        message = format_process_memory_info_ALL();
+        if (!message)
+        {
+            //printk(KERN_ERR "[ERROR] Failed to allocate memory for the display of all processes.\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
+    }
+    else if (strncmp(tmp, "FILTER|", 7) == 0)
+    {
+        struct process_memory_info *existing_info;
+        char *name = tmp + 7;
+        char *newline_ptr = strchr(name, '\n');
         printk(KERN_INFO "Read FILTER|\n");
-        argument = command + 7;
-    } else if (strncmp(command, "DEL|", 4) == 0) {
+        if (newline_ptr)
+        {
+            *newline_ptr = '\0'; // Remove newline character
+        }
+        if (strlen(name) > MAX_NAME_LENGTH)
+        {
+            printk(KERN_ERR "[ERROR] Invalid command, a process name can't be of length higher than %d.\n", MAX_NAME_LENGTH);
+            kfree(tmp);
+            return -EINVAL;
+        }
+        hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(name))
+        {
+            if (strncmp(existing_info->name, name, MAX_NAME_LENGTH) == 0)
+            {
+                message = format_process_memory_info(existing_info);
+                break;
+            }
+        }
+        if (!message)
+        {
+            //printk(KERN_ERR "[ERROR] Failed to allocate memory for the display of all processes.\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
+        /*message = kmalloc(strlen("FILTER: need to filter by ") + strlen(name) + 1, GFP_KERNEL);
+        if (!message)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
+        sprintf(message, "FILTER: need to filter by %s", name);*/
+    }
+    else if (strncmp(tmp, "DEL|", 4) == 0)
+    {
+        char *name = tmp + 4;
+        char *newline_ptr = strchr(name, '\n');
         printk(KERN_INFO "Read DEL|\n");
-        argument = command + 4;
-    } else {
-        ret = -EINVAL; // Unknown command
+        if (newline_ptr) {
+            *newline_ptr = '\0'; // Remove newline character
+        }
+        message = kmalloc(strlen("DEL: need to delete ") + strlen(name) + 1, GFP_KERNEL);
+        //test max length of process name ?
+        if (!message)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
+        sprintf(message, "DEL: need to delete %s", name);
+    }
+    else
+    {
+        //what to put in message ?
+        message = kstrdup("", GFP_KERNEL);
+        if (!message)
+        {
+            printk(KERN_ERR "[ERROR] Failed to allocate memory for the ...\n");
+            kfree(tmp);
+            return -ENOMEM;
+        }
         printk(KERN_INFO "Read ERROR IN COMMAND\n");
-        goto out;
+        printk(KERN_ERR "[ERROR] Unknown command %s.\n", tmp);
+        kfree(tmp);
+        return -EINVAL;
     }
 
-out:
-    // Cleanup in case of error
     kfree(tmp);
-    //kfree(command);
-    kfree(output_buffer);
-    return ret;
+    printk(KERN_INFO "end of write_msg, with cnt=%d and ret=%d\n", cnt, ret);
+    return cnt; //ret; //this fails
 }
 
 // this function reads a message from the pseudo file system via the seq_printf function
-static int show_the_proc(struct seq_file *a, void *v) {
-    seq_printf(a,"%s\n",message);
+static int show_the_proc(struct seq_file *a, void *v)
+{
+    seq_printf(a, "%s\n", message);
     return 0;
 }
 
 // this function opens the proc entry by calling the show_the_proc function
-static int open_the_proc(struct inode *inode, struct file *file) {
+static int open_the_proc(struct inode *inode, struct file *file)
+{
     return single_open(file, show_the_proc, NULL);
 }
 
@@ -318,24 +519,26 @@ static struct file_operations new_fops={ //defined in linux/fs.h
 };
 
 // Module initialization function
-static int __init module_start(void) {
+static int __init module_start(void)
+{
+    int res;
     // create proc entry with read/write functionality
     struct proc_dir_entry *entry = proc_create(DEV_NAME, 0777, NULL, &new_fops);
-    if(!entry) {
-        return -1;
-    } //else
-    printk(KERN_INFO "Memory information for running processes.\n");
-    populate_process_memory_info();
-    //print_process_info();
+    if (!entry)
+    {
+        printk(KERN_ERR "[ERROR] Failed to allocate memory for the process entry\n");
+        return -ENOMEM;
+    }
+    res = populate_process_memory_info();
     printk(KERN_INFO "Init Module [OK]\n");
-    return 0;
+    return res;
 }
 
 // Module exit function
-static void __exit module_stop(void) {
-    printk(KERN_INFO "exit");
+static void __exit module_stop(void)
+{
     free_process_memory_info();
-    printk(KERN_INFO "Memory information data structure freed.\n");
+    print_hash_table();
     // remove proc entry
     remove_proc_entry(DEV_NAME, NULL);
     printk(KERN_INFO "Exit Module [OK]\n");
