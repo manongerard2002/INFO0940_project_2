@@ -2,6 +2,7 @@ obj-m += module_project_os.o
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 load:
+	sudo dmesg -C
 	sudo insmod module_project_os.ko
 	dmesg
 remove:
