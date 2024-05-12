@@ -95,6 +95,58 @@ static void print_hash_table(void)
     printk(KERN_INFO "---------------------------------------\n");
 }
 
+static unsigned long count_valid_pages(struct mm_struct *mm)
+{
+    unsigned long valid_pages = 0;
+    struct vm_area_struct *vma;
+    unsigned long address;
+
+    // Iterate over each virtual memory area (VMA) in the process's memory map
+    for (vma = mm->mmap; vma; vma = vma->vm_next)
+    {
+        // Iterate over each page in the VMA
+        for (address = vma->vm_start; address < vma->vm_end; address += PAGE_SIZE)
+        {
+            pgd_t *pgd;
+        	p4d_t *p4d;
+        	pud_t *pud;
+        	pmd_t *pmd;
+        	pte_t *ptep;
+
+        	pgd = pgd_offset(mm, address);
+        	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+        		continue;
+
+        	p4d = p4d_offset(pgd, address);
+        	if (p4d_none(*p4d) || unlikely(p4d_bad(*p4d)))
+        		continue;
+
+        	pud = pud_offset(p4d, address);
+        	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+        		continue;
+
+        	pmd = pmd_offset(pud, address);
+	        VM_BUG_ON(pmd_trans_huge(*pmd));
+
+            //if (pmd_huge(*pmd))
+            //    continue;
+
+        	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+        		continue;
+
+            ptep = pte_offset_map(pmd, address);
+            if (!ptep)
+                continue;
+
+        	if (pte_present(*ptep))
+            {
+                valid_pages++;
+            }
+        }
+    }
+    return valid_pages;
+}
+
 // Function to populate the data structure with memory information for running processes
 static ssize_t populate_process_memory_hashlist(void)
 {
@@ -103,6 +155,7 @@ static ssize_t populate_process_memory_hashlist(void)
     struct process_memory_info *info, *existing_info;
     struct mm_struct *mm;
     struct pid_entry *new_pid_entry;
+    unsigned long valid_pages;
 
     // Iterate through each process
     for_each_process(task)
@@ -115,14 +168,14 @@ static ssize_t populate_process_memory_hashlist(void)
             continue;
         }
 
+        valid_pages = count_valid_pages(mm);
+
         // Check if the entry already exists in the hash table
         hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(task->comm))
         {
-            //printk(KERN_INFO "existing_info->name = %s    task->comm=%s", existing_info->name, task->comm);
             if (strncmp(existing_info->name, task->comm, MAX_NAME_LENGTH) == 0)
             {
                 // Entry already exists, update it
-                printk(KERN_INFO "Entry %s already exists", task->comm);
                 new_pid_entry = kmalloc(sizeof(struct pid_entry), GFP_KERNEL);
                 if (!new_pid_entry)
                 {
@@ -134,16 +187,15 @@ static ssize_t populate_process_memory_hashlist(void)
                 list_add_tail(&new_pid_entry->list_node, &existing_info->pids);
                 existing_info->pid_count++;
                 existing_info->nb_total_pages += mm->total_vm;
-                /*existing_info->nb_valid_pages += 0;
-                existing_info->nb_invalid_pages += 0;
-                existing_info->nb_shareable_pages += 2;
+                existing_info->nb_valid_pages += valid_pages;
+                existing_info->nb_invalid_pages += mm->total_vm - valid_pages;
+                /*existing_info->nb_shareable_pages += 0;
                 existing_info->nb_group += 0;*/
                 goto next_process;
             }
         }
 
         // Entry doesn't exist, allocate memory for the info structure
-        //printk(KERN_INFO "Entry %s doesn't exist", task->comm);
         info = kmalloc(sizeof(*info), GFP_KERNEL);
         if (!info)
         {
@@ -168,8 +220,8 @@ static ssize_t populate_process_memory_hashlist(void)
         list_add_tail(&new_pid_entry->list_node, &info->pids);
         info->pid_count = 1;
         info->nb_total_pages = mm->total_vm;
-        info->nb_valid_pages = 0;
-        info->nb_invalid_pages = 0;
+        info->nb_valid_pages = valid_pages;
+        info->nb_invalid_pages = mm->total_vm - valid_pages;
         info->nb_shareable_pages = 0;
         info->nb_group = 0;
 
@@ -179,7 +231,6 @@ static ssize_t populate_process_memory_hashlist(void)
     next_process:
         continue;
     }
-    print_hash_table();
 
 out_populate:
     return ret;
@@ -383,7 +434,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
             ret = error;
             goto out_free_tmp_write_msg;
         }
-        message = kstrdup("[SUCCESS]\n", GFP_KERNEL);
+        message = kstrdup("[SUCCESS]", GFP_KERNEL);
         if (!message)
         {
             printk(KERN_ERR "[ERROR] Failed to allocate memory for RESET message\n");
@@ -453,7 +504,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
             if (strncmp(existing_info->name, name, MAX_NAME_LENGTH) == 0)
             {
                 free_process_memory_info(existing_info);
-                message = kstrdup("[SUCCESS]\n", GFP_KERNEL);
+                message = kstrdup("[SUCCESS]", GFP_KERNEL);
                 if (!message)
                 {
                     printk(KERN_ERR "[ERROR] Failed to allocate memory for RESET message\n");
@@ -520,18 +571,20 @@ static int __init module_start(void)
         return -ENOMEM;
     }
     res = populate_process_memory_hashlist();
-    printk(KERN_INFO "Init Module [OK]\n");
     return res;
 }
 
 // Module exit function
 static void __exit module_stop(void)
 {
+    if (message)
+    {
+        kfree(message);
+    }
     free_process_memory_hashlist();
     print_hash_table();
     // remove proc entry
     remove_proc_entry(DEV_NAME, NULL);
-    printk(KERN_INFO "Exit Module [OK]\n");
 }
 
 module_init(module_start);
