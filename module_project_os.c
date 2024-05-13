@@ -59,7 +59,7 @@ void print_process_memory_info(struct process_memory_info *info)
 
     if (!info)
     {
-        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info.\n");
+        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info");
         return;
     }
 
@@ -84,15 +84,15 @@ static void print_hash_table(void)
     struct process_memory_info *info;
     unsigned int bkt;
 
-    printk(KERN_INFO "---------------------------------------\n");
-    printk(KERN_INFO "Printing Hash Table:\n");
+    printk(KERN_INFO "---------------------------------------");
+    printk(KERN_INFO "Printing Hash Table:");
 
     // Iterate over each possible entry in the hash table
     hash_for_each(process_memory_hashlist, bkt, info, hlist_node)
     {
         print_process_memory_info(info);
     }
-    printk(KERN_INFO "---------------------------------------\n");
+    printk(KERN_INFO "---------------------------------------");
 }
 
 static unsigned long count_valid_pages(struct mm_struct *mm)
@@ -199,7 +199,7 @@ static ssize_t populate_process_memory_hashlist(void)
         info = kmalloc(sizeof(*info), GFP_KERNEL);
         if (!info)
         {
-            printk(KERN_ERR "[ERROR] Failed to allocate memory for process info\n");
+            printk(KERN_ERR "[ERROR]: Failed to allocate memory for process info");
             ret = -ENOMEM;
             goto out_populate;
         }
@@ -211,7 +211,7 @@ static ssize_t populate_process_memory_hashlist(void)
         new_pid_entry = kmalloc(sizeof(struct pid_entry), GFP_KERNEL);
         if (!new_pid_entry) {
             // Handle allocation failure
-            printk(KERN_ERR "[ERROR] Failed to allocate memory for PIDs\n");
+            printk(KERN_ERR "[ERROR]: Failed to allocate memory for PIDs");
             kfree(info); // Free allocated memory if PID entry allocation fails
             ret = -ENOMEM;
             goto out_populate;
@@ -241,7 +241,7 @@ static void free_process_memory_info(struct process_memory_info *info)
     struct pid_entry *pid_entry, *pid_tmp;
     if (!info)
     {
-        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info.\n");
+        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info");
         return;
     }
 
@@ -281,7 +281,7 @@ static size_t calculate_buffer_size(struct process_memory_info *info)
     int i = 0;
     if (!info)
     {
-        printk(KERN_ERR "[ERROR] Null pointer passed to calculate_buffer_size.\n");
+        printk(KERN_ERR "[ERROR]: Null pointer passed to calculate_buffer_size");
         return 0;
     }
 
@@ -342,7 +342,7 @@ static char *format_process_memory_info(struct process_memory_info *info)
     char *output_buffer = NULL;
     if (!info)
     {
-        printk(KERN_ERR "[ERROR] Null pointer passed to format_process_memory_info.\n");
+        printk(KERN_ERR "[ERROR]: Null pointer passed to format_process_memory_info");
         return NULL;
     }
 
@@ -353,7 +353,7 @@ static char *format_process_memory_info(struct process_memory_info *info)
     output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL); //+1 for '\0'
     if (!output_buffer)
     {
-        printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+        printk(KERN_ERR "[ERROR]: Memory allocation error");
         return NULL;
     }
 
@@ -382,7 +382,7 @@ static char *format_process_memory_info_ALL(void)
     output_buffer = kmalloc(buffer_size + 1, GFP_KERNEL); //+1 for '\0'
     if (!output_buffer)
     {
-        printk(KERN_ERR "[ERROR] Failed to allocate memory for message.\n");
+        printk(KERN_ERR "[ERROR]: Memory allocation error");
         return NULL;
     }
 
@@ -403,7 +403,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
     char *tmp = kzalloc(cnt + 1, GFP_KERNEL);
     if (!tmp)
     {
-        printk(KERN_ERR "[ERROR] Failed to allocate memory for temporary buffer.\n");
+        printk(KERN_ERR "[ERROR]: Memory allocation error");
         ret = -ENOMEM;
         goto out_write_msg;
     }
@@ -411,7 +411,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
     // copy data from user space to kernel space by using copy_from_user
     if (copy_from_user(tmp, buff, cnt))
     {
-        printk(KERN_ERR "[ERROR] Bad address when attempting to copy from user to kernel space.\n");
+        printk(KERN_ERR "[ERROR]: Bad address");
         ret = -EFAULT;
         goto out_free_tmp_write_msg;
     }
@@ -437,7 +437,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         message = kstrdup("[SUCCESS]", GFP_KERNEL);
         if (!message)
         {
-            printk(KERN_ERR "[ERROR] Failed to allocate memory for RESET message\n");
+            printk(KERN_ERR "[ERROR]: Memory allocation error");
             ret = -ENOMEM;
             goto out_free_tmp_write_msg;
         }
@@ -462,8 +462,9 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         }
         if (strlen(name) > MAX_NAME_LENGTH)
         {
-            printk(KERN_ERR "[ERROR] Invalid command, a process name can't be of length higher than %d.\n", MAX_NAME_LENGTH);
-            ret = -EINVAL; //-ESRCH : lequel ?
+            message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
+            printk(KERN_ERR "[ERROR]: No such process");
+            ret = -ESRCH; //EINVAL; lequel ?
             goto out_free_tmp_write_msg;
         }
         hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(name))
@@ -480,8 +481,9 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         }
         if (!message)
         {
-            printk(KERN_ERR "[ERROR] No such process.");
-            ret = -ESRCH;
+            message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
+            printk(KERN_ERR "[ERROR]: No such process");
+            ret = -ESRCH; //EINVAL; lequel ?
             goto out_free_tmp_write_msg;
         }
     }
@@ -495,8 +497,9 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         }
         if (strlen(name) > MAX_NAME_LENGTH)
         {
-            printk(KERN_ERR "[ERROR] Invalid command, a process name can't be of length higher than %d.\n", MAX_NAME_LENGTH);
-            ret = -EINVAL; //-ESRCH : lequel ?
+            message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
+            printk(KERN_ERR "[ERROR]: No such process");
+            ret = -ESRCH; //EINVAL; lequel ?
             goto out_free_tmp_write_msg;
         }
         hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(name))
@@ -507,7 +510,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
                 message = kstrdup("[SUCCESS]", GFP_KERNEL);
                 if (!message)
                 {
-                    printk(KERN_ERR "[ERROR] Failed to allocate memory for RESET message\n");
+                    printk(KERN_ERR "[ERROR]: Memory allocation error");
                     ret = -ENOMEM;
                 }
                 goto out_free_tmp_write_msg;
@@ -515,14 +518,16 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         }
         if (!message)
         {
-            printk(KERN_ERR "[ERROR] No such process.");
+            message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
+            printk(KERN_ERR "[ERROR]: No such process");
             ret = -ESRCH;
             goto out_free_tmp_write_msg;
         }
     }
     else
     {
-        printk(KERN_ERR "[ERROR] Unknown command %s.\n", tmp);
+        message = kstrdup("[ERROR]: Invalid argument", GFP_KERNEL);
+        printk(KERN_ERR "[ERROR]: Invalid argument");
         ret = -EINVAL;
         goto out_free_tmp_write_msg;
     }
@@ -567,7 +572,7 @@ static int __init module_start(void)
     struct proc_dir_entry *entry = proc_create(DEV_NAME, 0777, NULL, &new_fops);
     if (!entry)
     {
-        printk(KERN_ERR "[ERROR] Failed to allocate memory for the process entry\n");
+        printk(KERN_ERR "[ERROR]: Memory allocation error");
         return -ENOMEM;
     }
     res = populate_process_memory_hashlist();
