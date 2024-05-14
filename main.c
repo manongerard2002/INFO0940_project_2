@@ -23,7 +23,6 @@ Example: cat /proc/$(pidof mmap_tester)/smaps_rollup|grep "Pss:"|head -n 1
 
 */
 
-#define NB_PAGES 10000  // The number of pages that you want (default 10000)
 #define PAGESIZE 0x1000 // 4KB - 4096 bytes (default size of a page; DO NOT EDIT)
 
 // Used for mmap/munmap/mprotect system calls
@@ -53,18 +52,41 @@ static void *memset(void *s, int c, int n) {
 }
 
 // Simple main function
+//testermmap
 int main() {
-  const int length = PAGESIZE * NB_PAGES;
-  char *addr = mmap(NULL, length, PROT, FLAGS, -1, 0);
+  // 1st group:
+  const int length1 = PAGESIZE * 2;
+  char *addr1 = mmap(NULL, length1, PROT, FLAGS, -1, 0);
+
+  // on-demand paging filled with 0xEE bytes
+  memset(addr1, 0xEE, length1);
+  // make read-only by calling the mprotect syscall
+  mprotect(addr1, length1, PROT_READ);
+
+  // 2nd group:
+  const int length2 = PAGESIZE * 2;
+  char *addr2 = mmap(NULL, length2, PROT, FLAGS, -1, 0);
 
   // on-demand paging filled with 0xFF bytes
-  memset(addr, 0xFF, length);
+  memset(addr2, 0xFF, length2);
   // make read-only by calling the mprotect syscall
-  mprotect(addr, length, PROT_READ);
+  mprotect(addr2, length2, PROT_READ);
+
+  // 3rd group:
+  const int length1b = PAGESIZE * 1;
+  char *addr1b = mmap(NULL, length1b, PROT, FLAGS, -1, 0);
+
+  // on-demand paging filled with 0xDD bytes
+  memset(addr1b, 0xDD, length1b);
+  // make read-only by calling the mprotect syscall
+  mprotect(addr1b, length1b, PROT_READ);
+
   // infinite loop for easy tracking
   while(1);
 
-  munmap(addr, length);
+  munmap(addr1, length1);
+  munmap(addr2, length2);
+  munmap(addr1b, length1b);
 
   return 0;
 }

@@ -17,7 +17,6 @@
 #include <linux/mm_types.h>
 #include <linux/pagemap.h>
 #include <linux/rcupdate.h>
-#include <asm/pgtable.h>
 
 #define DEV_NAME "memory_info"  // name of the proc entry
 #define MAX_PIDS 1000
@@ -45,14 +44,6 @@ struct process_memory_info {
     unsigned long nb_invalid_pages;
     unsigned long nb_shareable_pages;
     unsigned long nb_group;
-    struct hlist_head count_hashlist[PAGE_SHIFT]; //what value to put
-    struct hlist_node hlist_node;
-};
-
-// Define a structure to store the count of pages with each hash value
-struct hash_count {
-    unsigned long hash;
-    unsigned long count;
     struct hlist_node hlist_node;
 };
 
@@ -107,36 +98,15 @@ static void print_hash_table(void)
     printk(KERN_INFO "---------------------------------------");
 }
 
-// Function to calculate hash value for a page's content
-// based on calc_checksum from mm/ksm.c
-static inline unsigned long hash_page_content(struct page *page)
+static unsigned long count_valid_pages(struct mm_struct *mm)
 {
-    int i;
-    unsigned long hash = 0;
-    void *addr = kmap_atomic(page);
-    hash = jhash2(addr, PAGE_SIZE / sizeof(unsigned long), 17);
-    // Print the content of the page
-    printk(KERN_INFO "Page content:\n");
-    printk(KERN_CONT "%02x \n", ((unsigned char *)addr)[0]);
-    kunmap_atomic(addr);
-    return hash;
-}
-
-// Function to count shareable pages in a process's memory map
-static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
-{
-    unsigned long nb_valid_pages = 0;
-    unsigned long nb_shareable_pages = 0;
-    unsigned long nb_group = 0;
+    unsigned long valid_pages = 0;
     struct vm_area_struct *vma;
     unsigned long address;
-    struct page *page;
-    unsigned long hash;
-    struct hash_count *entry;
 
     if (!mm)
     {
-        return;
+        return 0;
     }
 
     // Iterate over each virtual memory area (VMA) in the process's memory map
@@ -146,81 +116,95 @@ static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
         for (address = vma->vm_start; address < vma->vm_end; address += PAGE_SIZE)
         {
             pgd_t *pgd;
-            p4d_t *p4d;
-            pud_t *pud;
-            pmd_t *pmd;
-            pte_t *ptep;
+        	p4d_t *p4d;
+        	pud_t *pud;
+        	pmd_t *pmd;
+        	pte_t *ptep;
 
-            // Traverse page tables to obtain the physical page associated with the virtual address
-            pgd = pgd_offset(mm, address);
-            if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
-                continue;
+        	pgd = pgd_offset(mm, address);
+        	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+        		continue;
 
-            p4d = p4d_offset(pgd, address);
-            if (p4d_none(*p4d) || unlikely(p4d_bad(*p4d)))
-                continue;
+        	p4d = p4d_offset(pgd, address);
+        	if (p4d_none(*p4d) || unlikely(p4d_bad(*p4d)))
+        		continue;
 
-            pud = pud_offset(p4d, address);
-            if (pud_none(*pud) || unlikely(pud_bad(*pud)))
-                continue;
+        	pud = pud_offset(p4d, address);
+        	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+        		continue;
 
-            pmd = pmd_offset(pud, address);
-            if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
-                continue;
+        	pmd = pmd_offset(pud, address);
+        	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+        		continue;
 
             ptep = pte_offset_map(pmd, address);
             if (!ptep)
                 continue;
-            
-            //would be best to reroup count valid & count shearable
-            if (pte_present(*ptep))
+
+        	if (pte_present(*ptep))
             {
-                nb_valid_pages++;
-
-                // Check if the page is read-only
-                if (vma->vm_flags && VM_READ) //should not be correct
-                //if (pte_read(*ptep)) // pte_read not defined in the architecture ?
-                {
-                    // Get the page corresponding to the virtual address
-                    page = pte_page(*ptep);
-
-                    // Calculate the hash value for the page's content
-                    hash = hash_page_content(page);
-
-                    // Look up the hash value in the hash table
-                    hash_for_each_possible(info->count_hashlist, entry, hlist_node, hash)
-                    {
-                        if (hash == entry->hash)
-                        {
-                            // Entry already exists, update it and counters
-                            if (entry->count == 1)
-                            {
-                                nb_group++;
-                                nb_shareable_pages++; //to take into account the 1st page
-                            }
-                            entry->count++;
-                            nb_shareable_pages++;
-                            goto next_page;
-                        }
-                    }
-
-                    // Entry doesn't exist, add it to the hash table
-                    entry = (struct hash_count *)kmalloc(sizeof(struct hash_count), GFP_KERNEL);
-                    entry->hash = hash;
-                    entry->count = 1;
-                    hash_add(info->count_hashlist, &entry->hlist_node, hash);
-
-                next_page:
-                    continue;
-                }
+                valid_pages++;
             }
         }
     }
-    info->nb_total_pages += mm->total_vm;
-    info->nb_valid_pages += nb_valid_pages;
-    info->nb_invalid_pages += mm->total_vm - nb_valid_pages;
-    info->nb_shareable_pages += nb_shareable_pages;
-    info->nb_group += nb_group;
+    return valid_pages;
+}
+
+// Function to calculate hash value for a page's content
+// based on calc_checksum from mm/ksm.c
+static inline unsigned long hash_page_content(struct page *page)
+{
+    unsigned long hash = 0;
+    void *addr = kmap_atomic(page);
+    hash = jhash2(addr, PAGE_SIZE / sizeof(unsigned long), 17);
+    kunmap_atomic(addr);
+    return hash;
+}
+
+// Function to count shareable pages in a process's memory map
+static unsigned long count_shareable_pages(struct mm_struct *mm)
+{
+    unsigned long shareable_pages = 0;
+    struct vm_area_struct *vma;
+    unsigned long address;
+    struct page *page;
+    unsigned long hash;
+    unsigned long prev_hash = 0;
+    bool first_page = true;
+
+    if (!mm)
+    {
+        return 0;
+    }
+
+    // Iterate over each virtual memory area (VMA) in the process's memory map
+    for (vma = mm->mmap; vma; vma = vma->vm_next)
+    {
+        // Iterate over each page in the VMA
+        for (address = vma->vm_start; address < vma->vm_end; address += PAGE_SIZE)
+        {
+            // Get the page corresponding to the current address
+            page = vmalloc_to_page((void*) address);
+            if (!page)
+                continue;
+
+            // Calculate the hash value for the page's content
+            hash = hash_page_content(page);
+
+            // Check if the current page's content matches the previous page's content
+            if (!first_page && hash == prev_hash)
+            {
+                // Found a shareable page
+                shareable_pages++;
+            }
+
+            // Update the previous hash for the next iteration
+            prev_hash = hash;
+            first_page = false;
+        }
+    }
+
+    return shareable_pages;
 }
 
 // Function to populate the data structure with memory information for running processes
@@ -228,14 +212,14 @@ static ssize_t populate_process_memory_hashlist(void)
 {
     ssize_t ret = 0;
     struct task_struct *task;
-    struct process_memory_info *info;
+    struct process_memory_info *info, *existing_info;
     struct mm_struct *mm;
     struct pid_entry *new_pid_entry;
+    unsigned long valid_pages, shareable_pages;
 
     // Iterate through each process
     for_each_process(task)
     {
-        int i;
         // Get task's memory management struct (mm)
         mm = get_task_mm(task);
         if (!mm)
@@ -244,10 +228,13 @@ static ssize_t populate_process_memory_hashlist(void)
             continue;
         }
 
+        valid_pages = count_valid_pages(mm);
+        shareable_pages = count_shareable_pages(mm);
+
         // Check if the entry already exists in the hash table
-        hash_for_each_possible(process_memory_hashlist, info, hlist_node, hash_str(task->comm))
+        hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(task->comm))
         {
-            if (strncmp(info->name, task->comm, MAX_NAME_LENGTH) == 0)
+            if (strncmp(existing_info->name, task->comm, MAX_NAME_LENGTH) == 0)
             {
                 // Entry already exists, update it
                 new_pid_entry = kmalloc(sizeof(struct pid_entry), GFP_KERNEL);
@@ -258,12 +245,13 @@ static ssize_t populate_process_memory_hashlist(void)
                     goto out_populate;
                 }
                 new_pid_entry->pid = task->pid;
-                list_add_tail(&new_pid_entry->list_node, &info->pids);
-                info->pid_count++;
-                //count_pages(info, mm);
-                if (strcmp(info->name, "mmap_tester") == 0) {
-                    count_pages(info, mm);
-                }
+                list_add_tail(&new_pid_entry->list_node, &existing_info->pids);
+                existing_info->pid_count++;
+                existing_info->nb_total_pages += mm->total_vm;
+                existing_info->nb_valid_pages += valid_pages;
+                existing_info->nb_invalid_pages += mm->total_vm - valid_pages;
+                existing_info->nb_shareable_pages += shareable_pages;
+                existing_info->nb_group += 0;
                 goto next_process;
             }
         }
@@ -292,19 +280,11 @@ static ssize_t populate_process_memory_hashlist(void)
         new_pid_entry->pid = task->pid;
         list_add_tail(&new_pid_entry->list_node, &info->pids);
         info->pid_count = 1;
-        info->nb_total_pages = 0;
-        info->nb_valid_pages = 0;
-        info->nb_invalid_pages = 0;
-        info->nb_shareable_pages = 0;
+        info->nb_total_pages = mm->total_vm;
+        info->nb_valid_pages = valid_pages;
+        info->nb_invalid_pages = mm->total_vm - valid_pages;
+        info->nb_shareable_pages = shareable_pages;
         info->nb_group = 0;
-        // Initialize count hashlist
-        for (i = 0; i < PAGE_SHIFT; i++) //what value to put
-        {
-            INIT_HLIST_HEAD(&info->count_hashlist[i]);
-        }
-        if (strcmp(info->name, "mmap_tester") == 0) {
-            count_pages(info, mm);
-        }
 
         // Add the new entry to the hashtable
         hash_add(process_memory_hashlist, &info->hlist_node, hash_str(task->comm));
@@ -320,9 +300,6 @@ out_populate:
 static void free_process_memory_info(struct process_memory_info *info)
 {
     struct pid_entry *pid_entry, *pid_tmp;
-    struct hash_count *entry;
-    struct hlist_node *tmp;
-    unsigned int bkt;
     if (!info)
     {
         printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info");
@@ -335,26 +312,26 @@ static void free_process_memory_info(struct process_memory_info *info)
         list_del(&pid_entry->list_node);
         kfree(pid_entry);
     }
-    // Iterate through the hash table and free memory for each entry
-    hash_for_each_safe(info->count_hashlist, bkt, tmp, entry, hlist_node)
-    {
-        hash_del(&entry->hlist_node);
-        kfree(entry);
-    }
     kfree(info);
 }
 
-// Function to free the hashlist
+// Function to free resources associated with DS
 static void free_process_memory_hashlist(void)
 {
     struct process_memory_info *info;
     struct hlist_node *tmp;
     unsigned int bkt;
-
+    struct pid_entry *pid_entry, *pid_tmp;
     // Iterate through the hash table and free memory for each entry
     hash_for_each_safe(process_memory_hashlist, bkt, tmp, info, hlist_node)
     {
-        free_process_memory_info(info);
+        // Free any allocated memory for the entry
+        hash_del(&info->hlist_node);
+        list_for_each_entry_safe(pid_entry, pid_tmp, &info->pids, list_node) {
+            list_del(&pid_entry->list_node);
+            kfree(pid_entry);
+        }
+        kfree(info);
     }
 }
 
@@ -537,7 +514,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
     }
     else if (strncmp(tmp, "FILTER|", 7) == 0)
     {
-        struct process_memory_info *info;
+        struct process_memory_info *existing_info;
         char *name = tmp + 7;
         char *newline_ptr = strchr(name, '\n');
         if (newline_ptr)
@@ -551,11 +528,11 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
             ret = -ESRCH; //EINVAL; lequel ?
             goto out_free_tmp_write_msg;
         }
-        hash_for_each_possible(process_memory_hashlist, info, hlist_node, hash_str(name))
+        hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(name))
         {
-            if (strncmp(info->name, name, MAX_NAME_LENGTH) == 0)
+            if (strncmp(existing_info->name, name, MAX_NAME_LENGTH) == 0)
             {
-                message = format_process_memory_info(info);
+                message = format_process_memory_info(existing_info);
                 if (!message)
                 {
                     ret = -ENOMEM;
@@ -573,7 +550,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
     }
     else if (strncmp(tmp, "DEL|", 4) == 0)
     {
-        struct process_memory_info *info;
+        struct process_memory_info *existing_info;
         char *name = tmp + 4;
         char *newline_ptr = strchr(name, '\n');
         if (newline_ptr) {
@@ -586,11 +563,11 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
             ret = -ESRCH; //EINVAL; lequel ?
             goto out_free_tmp_write_msg;
         }
-        hash_for_each_possible(process_memory_hashlist, info, hlist_node, hash_str(name))
+        hash_for_each_possible(process_memory_hashlist, existing_info, hlist_node, hash_str(name))
         {
-            if (strncmp(info->name, name, MAX_NAME_LENGTH) == 0)
+            if (strncmp(existing_info->name, name, MAX_NAME_LENGTH) == 0)
             {
-                free_process_memory_info(info);
+                free_process_memory_info(existing_info);
                 message = kstrdup("[SUCCESS]", GFP_KERNEL);
                 if (!message)
                 {
