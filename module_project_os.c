@@ -6,36 +6,49 @@
 #include <linux/module.h>   // all modules need this
 #include <linux/slab.h>     // memory allocation (kmalloc/kzalloc)
 #include <linux/kernel.h>   // kernel logging
-#include <linux/list.h>
-#include <linux/mm.h>
-#include <linux/sched/signal.h>
-#include <linux/sched/mm.h>
-#include <linux/memory.h>
-#include <linux/hashtable.h>
-#include <linux/jhash.h>
-#include <linux/types.h>
-#include <linux/mm_types.h>
-#include <linux/pagemap.h>
+#include <linux/list.h>     // linked list
+#include <linux/mm.h>       // memory management
+#include <linux/sched/signal.h>     // task_struct, for_each_process
+#include <linux/sched/mm.h>         // mm_struct, get_task_mm
+#include <linux/memory.h>           // struct page
+#include <linux/hashtable.h>        // hash table
+#include <linux/jhash.h>            // jhash
+#include <linux/types.h>            // u32
+#include <linux/mm_types.h>         // vm_area_struct
+#include <linux/pagemap.h>      
 #include <linux/rcupdate.h>
 #include <asm/pgtable.h>
 
 #define DEV_NAME "memory_info"  // name of the proc entry
-#define MAX_PIDS 1000
 #define MAX_NAME_LENGTH 16      // maximum length of a process name is limited at 16 characters
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Group08");
-MODULE_DESCRIPTION("Kernel module for tracking memory usage of processes");
+MODULE_LICENSE("GPL");          // license
+MODULE_AUTHOR("Group08");       // authors
+MODULE_DESCRIPTION("Kernel module for tracking memory usage of processes"); // description
 
 static char *message = NULL;
 
-// Define a structure to store the pid of a process
+/**
+ * @struct pid_entry
+ * @brief Represents a process ID entry.
+ * 
+ * This struct contains a process ID and a list node for linking the struct in a list.
+ */
 struct pid_entry {
     pid_t pid;
     struct list_head list_node;
 };
 
-// Define a structure to store memory information for each set of processes
+
+/**
+ * @struct process_memory_info
+ * @brief Represents information about a process's memory.
+ * 
+ * This struct contains various fields that provide information about a process's memory.
+ * It includes the process name, a list of process IDs, the count of process IDs, the number
+ * of total pages, valid pages, invalid pages, shareable pages, and group pages. It also
+ * includes a hashlist for counting pages and a hashlist node for linking the struct in a list.
+ */
 struct process_memory_info {
     char name[MAX_NAME_LENGTH];
     struct list_head pids;
@@ -49,80 +62,107 @@ struct process_memory_info {
     struct hlist_node hlist_node;
 };
 
-// Define a structure to store the count of pages with each hash value
+
+/**
+ * @struct hash_count
+ * @brief Represents a hash count entry.
+ * 
+ * This struct contains a hash value, a count, a page, and a hashlist node for linking the struct in a list.
+ */
 struct hash_count {
-    unsigned long hash;
+    u32 hash;
     unsigned long count;
+    struct page *page;
     struct hlist_node hlist_node;
 };
 
-static DEFINE_HASHTABLE(process_memory_hashlist, 8); //what number to put ? a power of 2
 
-// Function to calculate hash value for a string
+/**
+ * @brief Hash table for storing process memory information.
+ * 
+ * This hash table is used to store the process memory information for all running processes.
+ */
+static DEFINE_HASHTABLE(process_memory_hashlist, 8);
+
+
+/**
+ * @brief Hash function for strings.
+ *
+ * This function calculates the hash value for a given string.
+ *
+ * @param str The string for which the hash value needs to be calculated.
+ * @return The calculated hash value.
+ */
 static inline unsigned int hash_str(const char *str)
 {
     return jhash(str, strlen(str), 0);
 }
 
-void print_process_memory_info(struct process_memory_info *info)
+
+/**
+ * Calculates the checksum of a given page.
+ *
+ * @param page The page for which the checksum needs to be calculated.
+ * @return The calculated checksum.
+ */
+static u32 calc_checksum(struct page *page)
 {
-    struct pid_entry *pid_entry;
-    int i = 0;
-
-    if (!info)
-    {
-        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info");
-        return;
-    }
-
-    printk(KERN_INFO "%s, total: %lu, valid: %lu, invalid: %lu, may_be_shared: %lu, nb_group: %lu, pid(%d): ", 
-            info->name, info->nb_total_pages, info->nb_valid_pages, info->nb_invalid_pages, 
-            info->nb_shareable_pages, info->nb_group, info->pid_count);
-
-    // Print all the PIDs associated with this process name
-    list_for_each_entry(pid_entry, &info->pids, list_node)
-    {
-        printk(KERN_CONT "%d", pid_entry->pid);
-        if (++i < info->pid_count)
-        {
-            printk(KERN_CONT "; ");
-        }
-    }
-    printk(KERN_CONT "\n");
-}
-
-static void print_hash_table(void)
-{
-    struct process_memory_info *info;
-    unsigned int bkt;
-
-    printk(KERN_INFO "---------------------------------------");
-    printk(KERN_INFO "Printing Hash Table:");
-
-    // Iterate over each possible entry in the hash table
-    hash_for_each(process_memory_hashlist, bkt, info, hlist_node)
-    {
-        print_process_memory_info(info);
-    }
-    printk(KERN_INFO "---------------------------------------");
-}
-
-// Function to calculate hash value for a page's content
-// based on calc_checksum from mm/ksm.c
-static inline unsigned long hash_page_content(struct page *page)
-{
-    int i;
-    unsigned long hash = 0;
+    u32 checksum;
     void *addr = kmap_atomic(page);
-    hash = jhash2(addr, PAGE_SIZE / sizeof(unsigned long), 17);
-    // Print the content of the page
-    printk(KERN_INFO "Page content:\n");
-    printk(KERN_CONT "%02x \n", ((unsigned char *)addr)[0]);
+    checksum = jhash2(addr, PAGE_SIZE / 4, 17);
     kunmap_atomic(addr);
-    return hash;
+    return checksum;
 }
 
-// Function to count shareable pages in a process's memory map
+
+/**
+ * Compares the contents of two pages in memory.
+ *
+ * This function compares the contents of two pages in memory, specified by `page1` and `page2`.
+ * It uses the `kmap_atomic` function to map the pages to kernel virtual addresses, and then
+ * uses the `memcmp` function to compare the contents of the pages. Finally, it uses the
+ * `kunmap_atomic` function to unmap the pages.
+ *
+ * @param page1 The first page to compare.
+ * @param page2 The second page to compare.
+ * @return 0 if the pages have the same contents, a negative value if `page1` is less than `page2`,
+ *         or a positive value if `page1` is greater than `page2`.
+ */
+static int memcmp_pages(struct page *page1, struct page *page2)
+{
+    char *addr1, *addr2;
+    int ret;
+
+    addr1 = kmap_atomic(page1);
+    addr2 = kmap_atomic(page2);
+    ret = memcmp(addr1, addr2, PAGE_SIZE);
+    kunmap_atomic(addr2);
+    kunmap_atomic(addr1);
+    return ret;
+}
+
+
+/**
+ * Determines whether two pages are identical.
+ *
+ * @param page1 The first page to compare.
+ * @param page2 The second page to compare.
+ * @return 1 if the pages are identical, 0 otherwise.
+ */
+
+static int pages_identical(struct page *page1, struct page *page2)
+{
+	return !memcmp_pages(page1, page2);
+}
+
+
+/**
+ * Fill in the various fields related to pages in a process's memory. The field includes
+ * the number of total pages, valid pages, invalid pages, shareable pages, and group.
+ *
+ * @param info Pointer to the process_memory_info structure.
+ * @param mm Pointer to the mm_struct structure.
+ */
 static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
 {
     unsigned long nb_valid_pages = 0;
@@ -131,7 +171,7 @@ static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
     struct vm_area_struct *vma;
     unsigned long address;
     struct page *page;
-    unsigned long hash;
+    u32 hash;
     struct hash_count *entry;
 
     if (!mm)
@@ -171,26 +211,23 @@ static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
             ptep = pte_offset_map(pmd, address);
             if (!ptep)
                 continue;
-            
-            //would be best to reroup count valid & count shearable
+
             if (pte_present(*ptep))
             {
                 nb_valid_pages++;
 
-                // Check if the page is read-only
-                if (vma->vm_flags && VM_READ) //should not be correct
-                //if (pte_read(*ptep)) // pte_read not defined in the architecture ?
+                if (vma->vm_flags & VM_READ) // readable pages
                 {
                     // Get the page corresponding to the virtual address
                     page = pte_page(*ptep);
 
                     // Calculate the hash value for the page's content
-                    hash = hash_page_content(page);
+                    hash = calc_checksum(page);
 
                     // Look up the hash value in the hash table
                     hash_for_each_possible(info->count_hashlist, entry, hlist_node, hash)
                     {
-                        if (hash == entry->hash)
+                        if (pages_identical(page, entry->page))
                         {
                             // Entry already exists, update it and counters
                             if (entry->count == 1)
@@ -208,6 +245,7 @@ static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
                     entry = (struct hash_count *)kmalloc(sizeof(struct hash_count), GFP_KERNEL);
                     entry->hash = hash;
                     entry->count = 1;
+                    entry->page = page;
                     hash_add(info->count_hashlist, &entry->hlist_node, hash);
 
                 next_page:
@@ -223,7 +261,15 @@ static void count_pages(struct process_memory_info *info, struct mm_struct *mm)
     info->nb_group += nb_group;
 }
 
-// Function to populate the data structure with memory information for running processes
+
+/**
+ * Populates the process memory hashlist.
+ *
+ * This function is responsible for populating the hashlist that stores the process memory information.
+ * It is a static function, meaning it can only be accessed within the same source file.
+ *
+ * @return The number of bytes populated in the hashlist, or a negative value if an error occurred.
+ */
 static ssize_t populate_process_memory_hashlist(void)
 {
     ssize_t ret = 0;
@@ -260,10 +306,7 @@ static ssize_t populate_process_memory_hashlist(void)
                 new_pid_entry->pid = task->pid;
                 list_add_tail(&new_pid_entry->list_node, &info->pids);
                 info->pid_count++;
-                //count_pages(info, mm);
-                if (strcmp(info->name, "mmap_tester") == 0) {
-                    count_pages(info, mm);
-                }
+                count_pages(info, mm);
                 goto next_process;
             }
         }
@@ -302,9 +345,7 @@ static ssize_t populate_process_memory_hashlist(void)
         {
             INIT_HLIST_HEAD(&info->count_hashlist[i]);
         }
-        if (strcmp(info->name, "mmap_tester") == 0) {
-            count_pages(info, mm);
-        }
+        count_pages(info, mm);
 
         // Add the new entry to the hashtable
         hash_add(process_memory_hashlist, &info->hlist_node, hash_str(task->comm));
@@ -317,6 +358,12 @@ out_populate:
     return ret;
 }
 
+
+/**
+ * Frees the memory allocated for a struct process_memory_info object.
+ *
+ * @param info A pointer to the struct process_memory_info object to be freed.
+ */
 static void free_process_memory_info(struct process_memory_info *info)
 {
     struct pid_entry *pid_entry, *pid_tmp;
@@ -325,7 +372,7 @@ static void free_process_memory_info(struct process_memory_info *info)
     unsigned int bkt;
     if (!info)
     {
-        printk(KERN_ERR "Error: NULL pointer passed to print_process_memory_info");
+        printk(KERN_ERR "Error: NULL pointer passed to free_process_memory_info");
         return;
     }
 
@@ -344,7 +391,13 @@ static void free_process_memory_info(struct process_memory_info *info)
     kfree(info);
 }
 
-// Function to free the hashlist
+
+/**
+ * Frees the memory allocated for the process memory hashlist.
+ *
+ * This function is responsible for freeing the memory allocated for the process memory hashlist.
+ * It should be called when the hashlist is no longer needed to prevent memory leaks.
+ */
 static void free_process_memory_hashlist(void)
 {
     struct process_memory_info *info;
@@ -357,6 +410,14 @@ static void free_process_memory_hashlist(void)
         free_process_memory_info(info);
     }
 }
+
+
+/**
+ * Calculates the buffer size based on the given process memory information.
+ *
+ * @param info A pointer to the struct process_memory_info containing the process memory information.
+ * @return The size of the buffer calculated based on the process memory information.
+ */
 
 static size_t calculate_buffer_size(struct process_memory_info *info)
 {
@@ -386,12 +447,20 @@ static size_t calculate_buffer_size(struct process_memory_info *info)
     return buffer_size;
 }
 
-// Function to generate the message for a given process info
+
+/**
+ * Generates a process information message based on the provided process memory information.
+ *
+ * @param info The process memory information.
+ * @param output_buffer The buffer to store the generated message.
+ * @param buffer_size The size of the output buffer.
+ * @return The size of the generated message.
+ */
 static size_t generate_process_info_message(struct process_memory_info *info, char *output_buffer, size_t buffer_size)
 {
     struct pid_entry *pid_entry;
     size_t tmp_buffer_size = 0;
-    size_t tmp_size = 0; //need to find better name
+    size_t tmp_size = 0;
     int i = 0;
 
     // Generate the message for the given process info
@@ -419,7 +488,13 @@ static size_t generate_process_info_message(struct process_memory_info *info, ch
     return tmp_buffer_size;
 }
 
-// Function to format process memory info for a single process
+
+/**
+ * Formats the process memory information.
+ *
+ * @param info A pointer to the process_memory_info structure containing the memory information.
+ * @return A pointer to the formatted memory information string.
+ */
 static char *format_process_memory_info(struct process_memory_info *info)
 {
     size_t buffer_size = 0;
@@ -447,7 +522,15 @@ static char *format_process_memory_info(struct process_memory_info *info)
     return output_buffer;
 }
 
-// Function to format process memory info for all processes
+
+/**
+ * @brief Formats the process memory information for all processes.
+ *
+ * This function takes no arguments and returns a pointer to a character array.
+ * It formats the process memory information for all processes and returns the result as a string.
+ *
+ * @return A pointer to a character array containing the formatted process memory information.
+ */
 static char *format_process_memory_info_ALL(void)
 {
     struct process_memory_info *info;
@@ -479,7 +562,20 @@ static char *format_process_memory_info_ALL(void)
     return output_buffer;
 }
 
-// this function writes a message to the pseudo file system
+
+/**
+ * Writes a message to a file.
+ *
+ * This function is responsible for writing the contents corresponding to the command entered in
+ * the buffer `buff` to the file associated with the file structure `file`. The number of bytes 
+ * to in the biffer is specified by `cnt`. The current file position is stored in `f_pos`.
+ *
+ * @param file  Pointer to the file structure representing the file to write to.
+ * @param buff  Pointer to the buffer containing the message to write.
+ * @param cnt   Number of bytes to write.
+ * @param f_pos Pointer to the current file position.
+ * @return      The number of bytes written, or a negative error code on failure.
+ */
 static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt, loff_t *f_pos)
 {
     ssize_t ret = cnt;
@@ -548,7 +644,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         {
             message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
             printk(KERN_ERR "[ERROR]: No such process");
-            ret = -ESRCH; //EINVAL; lequel ?
+            ret = -ESRCH;
             goto out_free_tmp_write_msg;
         }
         hash_for_each_possible(process_memory_hashlist, info, hlist_node, hash_str(name))
@@ -567,7 +663,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         {
             message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
             printk(KERN_ERR "[ERROR]: No such process");
-            ret = -ESRCH; //EINVAL; lequel ?
+            ret = -ESRCH;
             goto out_free_tmp_write_msg;
         }
     }
@@ -583,7 +679,7 @@ static ssize_t write_msg(struct file *file, const char __user *buff, size_t cnt,
         {
             message = kstrdup("[ERROR]: No such process", GFP_KERNEL);
             printk(KERN_ERR "[ERROR]: No such process");
-            ret = -ESRCH; //EINVAL; lequel ?
+            ret = -ESRCH;
             goto out_free_tmp_write_msg;
         }
         hash_for_each_possible(process_memory_hashlist, info, hlist_node, hash_str(name))
@@ -622,18 +718,39 @@ out_write_msg:
     return ret;
 }
 
-// this function reads a message from the pseudo file system via the seq_printf function
+
+/**
+ * Show the proc information.
+ *
+ * This function is responsible for displaying the proc information in the given seq_file.
+ *
+ * @param a     The seq_file pointer to write the information to.
+ * @param v     The pointer to the data structure associated with the proc information.
+ *
+ * @return      Returns an integer value indicating the status of the operation.
+ */
 static int show_the_proc(struct seq_file *a, void *v)
 {
     seq_printf(a, "%s\n", message);
     return 0;
 }
 
-// this function opens the proc entry by calling the show_the_proc function
+
+/**
+ * Opens the proc file.
+ *
+ * This function is called when a process attempts to open the proc file.
+ * It is responsible for initializing the file structure and performing any necessary setup.
+ *
+ * @param inode Pointer to the inode structure representing the proc file.
+ * @param file Pointer to the file structure representing the opened file.
+ * @return 0 on success, or a negative error code on failure.
+ */
 static int open_the_proc(struct inode *inode, struct file *file)
 {
     return single_open(file, show_the_proc, NULL);
 }
+
 
 /*-----------------------------------------------------------------------*/
 // Structure that associates a set of function pointers (e.g., device_open)
@@ -648,7 +765,15 @@ static struct file_operations new_fops={ //defined in linux/fs.h
     .llseek = seq_lseek,
 };
 
-// Module initialization function
+
+/**
+ * @brief Initializes the module.
+ *
+ * This function is called when the module is loaded into the kernel.
+ * It performs the necessary initialization tasks for the module.
+ *
+ * @return Returns 0 on success, or a negative error code on failure.
+ */
 static int __init module_start(void)
 {
     int res;
@@ -663,17 +788,24 @@ static int __init module_start(void)
     return res;
 }
 
-// Module exit function
+
+/**
+ * @brief Stops the module.
+ *
+ * This function is called when the module is removed from the kernel.
+ * It performs the necessary cleanup tasks for the module.
+ */
 static void __exit module_stop(void)
 {
     if (message)
     {
-        kfree(message);
+        kfree(message); //free memory
     }
+    // free memory
     free_process_memory_hashlist();
     // remove proc entry
     remove_proc_entry(DEV_NAME, NULL);
 }
 
-module_init(module_start);
-module_exit(module_stop);
+module_init(module_start);  //module initialization
+module_exit(module_stop);   //module exit
